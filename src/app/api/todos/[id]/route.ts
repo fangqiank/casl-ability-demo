@@ -5,12 +5,12 @@ import {authOptions} from "@/lib/auth";
 
 export async function PUT(
   request: NextRequest,
-  {params}: {params: {id: string}},
+  {params}: {params: Promise<{id: string}>},
 ) {
   try {
     const session = await getServerSession(authOptions);
     const user = session?.user || null;
-    const id = params.id;
+    const {id} = await params;
 
     const data = await request.json();
     const todoAccess = new TodoDataAccess(user);
@@ -39,13 +39,13 @@ export async function PUT(
 }
 
 export async function DELETE(
-  request: NextRequest,
-  {params}: {params: {id: string}},
+  _request: NextRequest,
+  {params}: {params: Promise<{id: string}>},
 ) {
   try {
     const session = await getServerSession(authOptions);
     const user = session?.user || null;
-    const id = params.id;
+    const {id} = await params;
 
     const todoAccess = new TodoDataAccess(user);
     await todoAccess.deleteTodo(id);

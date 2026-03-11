@@ -1,4 +1,4 @@
-import { UserRole } from '@/lib/ability/types';
+import { UserRole } from '@/lib/rbac/config';
 import 'next-auth';
 import 'next-auth/jwt';
 

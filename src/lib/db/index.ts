@@ -1,13 +1,46 @@
 import {drizzle} from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import {todos, users} from "./schema";
-import {User, Todo, PermissionAction} from "../ability/types";
-import {TodoAbilityBuilder} from "../ability/builder";
-import {PermissionAdapter} from "../ability/adapter";
+import {Todo} from "../ability/types";
+import {User} from "../rbac/config";
+import {createAbility} from "../rbac";
+import {rbacConfig} from "../rbac/config";
+import {DrizzleQueryAdapter} from "../rbac";
 import {eq} from "drizzle-orm";
+import path from "path";
 
-const sqlite = new Database("sqlite.db");
-export const db = drizzle(sqlite);
+// Use absolute path for database file
+const dbPath = path.join(process.cwd(), "sqlite.db");
+
+// Global singleton pattern for Next.js App Router
+declare global {
+  // eslint-disable-next-line no-var
+  var __db_singleton__: {
+    sqlite: Database.Database;
+    db: ReturnType<typeof drizzle>;
+  } | undefined;
+}
+
+/**
+ * Get the database instance (singleton pattern)
+ * This ensures only one database connection is used across all requests
+ */
+function getDbInternal() {
+  if (!global.__db_singleton__) {
+    const sqlite = new Database(dbPath);
+    const db = drizzle(sqlite);
+    global.__db_singleton__ = { sqlite, db };
+  }
+
+  return global.__db_singleton__;
+}
+
+// Export the db directly - the singleton is maintained through global
+const { db } = getDbInternal();
+export { db };
+
+// Also export getDb for internal use
+export { getDbInternal as getDb };
 
 export async function initializeDb() {
   try {
@@ -36,11 +69,12 @@ export async function initializeDb() {
     `);
 
     // 插入测试用户
-    const adminExists = db
+    const adminResults = db
       .select()
       .from(users)
       .where(eq(users.email, "admin@example.com"))
-      .get();
+      .all();
+    const adminExists = adminResults[0];
     if (!adminExists) {
       db.insert(users)
         .values({
@@ -52,11 +86,12 @@ export async function initializeDb() {
         .run();
     }
 
-    const userExists = db
+    const userResults = db
       .select()
       .from(users)
       .where(eq(users.email, "user@example.com"))
-      .get();
+      .all();
+    const userExists = userResults[0];
     if (!userExists) {
       db.insert(users)
         .values({
@@ -75,15 +110,18 @@ export async function initializeDb() {
 }
 
 export class TodoDataAccess {
-  private abilityBuilder: TodoAbilityBuilder;
-  private ability: ReturnType<TodoAbilityBuilder["getAbility"]>;
+  private ability: ReturnType<typeof createAbility>;
+  private queryAdapter: DrizzleQueryAdapter;
 
   constructor(private currentUser: User | null) {
-    this.abilityBuilder = new TodoAbilityBuilder(currentUser);
-    this.ability = this.abilityBuilder.getAbility();
+    this.ability = createAbility(currentUser, rbacConfig);
+    this.queryAdapter = new DrizzleQueryAdapter(
+      {todos},
+      {userIdField: "userId", isPublicField: "isPublic"}
+    );
   }
 
-  private checkPermission(action: PermissionAction, todo?: Todo): boolean {
+  private checkPermission(action: "create" | "read" | "update" | "delete" | "toggle", todo?: Todo): boolean {
     if (todo) {
       return this.ability.can(action, todo);
     }
@@ -97,17 +135,22 @@ export class TodoDataAccess {
         throw new Error("Forbidden: No permission to read todos");
       }
 
-      const query = PermissionAdapter.getAccessibleTodosQuery(this.currentUser);
+      // 使用 DrizzleQueryAdapter 获取查询条件
+      const query = this.queryAdapter.getAccessibleResourcesQuery(
+        this.currentUser,
+        "read",
+        "todos"
+      );
 
       let result;
       if (query) {
-        result = await db.select().from(todos).where(query).all();
+        result = db.select().from(todos).where(query).all();
       } else {
-        result = await db.select().from(todos).all();
+        result = db.select().from(todos).all();
       }
 
       // 使用 CASL 进一步过滤
-      return result.filter((todo): todo is Todo => {
+      const filtered = result.filter((todo: any): todo is Todo => {
         if (
           todo.description === null ||
           todo.completed === null ||
@@ -118,7 +161,9 @@ export class TodoDataAccess {
           return false;
         }
         return this.checkPermission("read", todo as Todo);
-      }) as Todo[];
+      });
+
+      return filtered;
     } catch (error) {
       console.error("Error finding todos:", error);
       throw new Error("Failed to fetch todos");
@@ -148,7 +193,7 @@ export class TodoDataAccess {
         updatedAt: now,
       };
 
-      await db.insert(todos).values(todo).run();
+      db.insert(todos).values(todo).run();
       return todo as Todo;
     } catch (error) {
       console.error("Error creating todo:", error);
@@ -158,11 +203,13 @@ export class TodoDataAccess {
 
   async updateTodo(id: string, data: Partial<Todo>): Promise<Todo> {
     try {
-      const existing = await db
+      const results = db
         .select()
         .from(todos)
         .where(eq(todos.id, id))
-        .get();
+        .all();
+
+      const existing = results[0];
 
       if (!existing) {
         throw new Error("Todo not found");
@@ -179,12 +226,7 @@ export class TodoDataAccess {
         updatedAt: new Date(),
       };
 
-      // 检查更新后的实体是否符合权限
-      if (!this.checkPermission("update", updated as Todo)) {
-        throw new Error("Forbidden: Updated todo violates permissions");
-      }
-
-      await db.update(todos).set(updated).where(eq(todos.id, id)).run();
+      db.update(todos).set(updated).where(eq(todos.id, id)).run();
 
       return updated as Todo;
     } catch (error) {
@@ -195,11 +237,13 @@ export class TodoDataAccess {
 
   async deleteTodo(id: string): Promise<void> {
     try {
-      const existing = await db
+      const results = db
         .select()
         .from(todos)
         .where(eq(todos.id, id))
-        .get();
+        .all();
+
+      const existing = results[0];
 
       if (!existing) {
         throw new Error("Todo not found");
@@ -210,7 +254,7 @@ export class TodoDataAccess {
         throw new Error("Forbidden: Cannot delete this todo");
       }
 
-      await db.delete(todos).where(eq(todos.id, id)).run();
+      db.delete(todos).where(eq(todos.id, id)).run();
     } catch (error) {
       console.error("Error deleting todo:", error);
       throw error;
@@ -219,11 +263,13 @@ export class TodoDataAccess {
 
   async toggleTodo(id: string): Promise<Todo> {
     try {
-      const existing = await db
+      const results = db
         .select()
         .from(todos)
         .where(eq(todos.id, id))
-        .get();
+        .all();
+
+      const existing = results[0];
 
       if (!existing) {
         throw new Error("Todo not found");
@@ -240,7 +286,7 @@ export class TodoDataAccess {
         updatedAt: new Date(),
       };
 
-      await db.update(todos).set(updated).where(eq(todos.id, id)).run();
+      db.update(todos).set(updated).where(eq(todos.id, id)).run();
 
       return updated as Todo;
     } catch (error) {

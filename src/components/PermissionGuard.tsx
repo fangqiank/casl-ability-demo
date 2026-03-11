@@ -1,9 +1,11 @@
 'use client'
 
-import { ReactNode } from 'react';
+import { ReactNode, useMemo } from 'react';
 import { useSession } from 'next-auth/react';
-import { User, Todo } from '@/lib/ability/types';
-import { getUserPermissions } from '@/lib/ability/permissions';
+import { User as RBACUser } from '@/lib/rbac/config';
+import { createAbility } from '@/lib/rbac';
+import { rbacConfig } from '@/lib/rbac/config';
+import { Todo } from '@/lib/ability/types';
 
 interface PermissionGuardProps {
   children: ReactNode;
@@ -12,35 +14,25 @@ interface PermissionGuardProps {
   fallback?: ReactNode;
 }
 
-export function PermissionGuard({ 
-  children, 
-  action, 
-  todo, 
-  fallback = null 
+export function PermissionGuard({
+  children,
+  action,
+  todo,
+  fallback = null
 }: PermissionGuardProps) {
   const { data: session } = useSession();
-  const user = session?.user as User | null;
-  const permissions = getUserPermissions(user);
+  const user = session?.user as RBACUser | null;
 
-  let hasPermission = false;
+  const ability = useMemo(() => {
+    return createAbility(user, rbacConfig);
+  }, [user]);
 
-  switch (action) {
-    case 'create':
-      hasPermission = permissions.canCreateTodo(user?.id || '');
-      break;
-    case 'read':
-      hasPermission = todo ? permissions.canReadTodo(user?.id || '', todo) : true;
-      break;
-    case 'update':
-      hasPermission = todo ? permissions.canUpdateTodo(user?.id || '', todo) : false;
-      break;
-    case 'delete':
-      hasPermission = todo ? permissions.canDeleteTodo(user?.id || '', todo) : false;
-      break;
-    case 'toggle':
-      hasPermission = todo ? permissions.canToggleTodo(user?.id || '', todo) : false;
-      break;
-  }
+  const hasPermission = useMemo(() => {
+    if (todo) {
+      return ability.can(action, todo);
+    }
+    return ability.can(action, 'Todo');
+  }, [ability, action, todo]);
 
-	return hasPermission ? <>{children}</> : <>{fallback}</>;
+  return hasPermission ? <>{children}</> : <>{fallback}</>;
 }

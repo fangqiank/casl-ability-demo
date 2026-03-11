@@ -5,12 +5,12 @@ import {authOptions} from "@/lib/auth";
 
 export async function POST(
   request: NextRequest,
-  {params}: {params: {id: string}},
+  {params}: {params: Promise<{id: string}>},
 ) {
   try {
     const session = await getServerSession(authOptions);
     const user = session?.user || null;
-    const id = params.id;
+    const {id} = await params;
 
     const todoAccess = new TodoDataAccess(user);
     const todo = await todoAccess.toggleTodo(id);
